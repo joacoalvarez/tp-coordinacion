@@ -3,6 +3,7 @@ package sum
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -21,9 +22,12 @@ type SumConfig struct {
 }
 
 type Sum struct {
-	inputQueue     middleware.Middleware
-	outputExchange middleware.Middleware
+	inputQueue      	 middleware.Middleware
+	outputExchange  	 middleware.Middleware
+	controlProducer 	 middleware.Middleware
+	controlConsumer 	 middleware.Middleware
 	clientFruitItemMap   map[uint64]map[string]fruititem.FruitItem
+	mutex                sync.Mutex
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -45,17 +49,69 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
+	// Internal control Middlewares
+	controlProducerRouteKeys := make([]string, 0, config.SumAmount-1)
+	for i := range config.SumAmount {
+		if i == config.Id {
+			continue
+		}
+		controlProducerRouteKeys = append(controlProducerRouteKeys, fmt.Sprintf("%s_%d", config.SumPrefix, i))
+	}
+	
+	controlProducer, err := middleware.CreateExchangeMiddleware(config.SumPrefix, controlProducerRouteKeys, connSettings)
+	if err != nil {
+		inputQueue.Close()
+		outputExchange.Close()
+		return nil, err
+	}
+
+	controlConsumerRouteKeys := []string{fmt.Sprintf("%s_%d", config.SumPrefix, config.Id)}
+	controlConsumer, err := middleware.CreateExchangeMiddleware(config.SumPrefix, controlConsumerRouteKeys, connSettings)
+	if err != nil {
+		inputQueue.Close()
+		outputExchange.Close()
+		controlProducer.Close()
+		return nil, err
+	}
+
 	return &Sum{
 		inputQueue:     inputQueue,
 		outputExchange: outputExchange,
+		controlProducer: controlProducer,
+		controlConsumer: controlConsumer,
 		clientFruitItemMap:   map[uint64]map[string]fruititem.FruitItem{},
 	}, nil
 }
 
 func (sum *Sum) Run() {
+	go sum.controlConsumer.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		sum.handleControlMessage(msg, ack, nack)
+	})
+
 	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleMessage(msg, ack, nack)
 	})
+}
+
+func (sum *Sum) handleControlMessage(msg middleware.Message, ack func(), nack func()) {
+	defer ack()
+
+	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
+	if err != nil {
+		slog.Error("While deserializing control message", "err", err)
+		return
+	}
+
+	if isEof {
+		slog.Info("Received End Of Records control message")
+		if err := sum.handleEndOfRecordMessage(clientId); err != nil {
+			slog.Error("While handling end of record message", "err", err)
+		}
+	} else {
+		slog.Error("Received unexpected control message")
+	}
+
+	slog.Info("Received control message", "clientId", clientId, "fruitRecords", fruitRecords)
 }
 
 func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
@@ -68,8 +124,19 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	}
 
 	if isEof {
+		eofMessage := []fruititem.FruitItem{}
+		message, err := inner.SerializeMessage(clientId, eofMessage)
+		if err != nil {
+			slog.Error("While serializing EOF control message", "err", err)
+			return
+		}
+		if err := sum.controlProducer.Send(*message); err != nil {
+			slog.Error("While sending EOF control message", "err", err)
+			return
+		}
 		if err := sum.handleEndOfRecordMessage(clientId); err != nil {
 			slog.Error("While handling end of record message", "err", err)
+			return
 		}
 		return
 	}
@@ -80,6 +147,9 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 }
 
 func (sum *Sum) handleEndOfRecordMessage(clientId uint64) error {
+	sum.mutex.Lock()
+	defer sum.mutex.Unlock()
+
 	slog.Info("Received End Of Records message")
 	for key := range sum.clientFruitItemMap[clientId] {
 		fruitRecord := []fruititem.FruitItem{sum.clientFruitItemMap[clientId][key]}
@@ -104,10 +174,15 @@ func (sum *Sum) handleEndOfRecordMessage(clientId uint64) error {
 		slog.Debug("While sending EOF message", "err", err)
 		return err
 	}
+
+	delete(sum.clientFruitItemMap, clientId)
 	return nil
 }
 
 func (sum *Sum) handleDataMessage(clientId uint64, fruitRecords []fruititem.FruitItem) error {
+	sum.mutex.Lock()
+	defer sum.mutex.Unlock()
+
 	if _, ok := sum.clientFruitItemMap[clientId]; !ok {
 		sum.clientFruitItemMap[clientId] = map[string]fruititem.FruitItem{}
 	}
