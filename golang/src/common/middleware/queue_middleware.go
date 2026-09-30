@@ -59,3 +59,8 @@ func (q *QueueMiddleware) Send(msg Message) error {
 
 	return nil
 }
+
+// Una cola no tiene routing keys: SendTo no está soportado.
+func (q *QueueMiddleware) SendTo(msg Message, key string) error {
+	return ErrMessageMiddlewareMessage
+}

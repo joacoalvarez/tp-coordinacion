@@ -2,7 +2,9 @@ package join
 
 import (
 	"log/slog"
+	"sort"
 
+	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
 )
@@ -20,8 +22,12 @@ type JoinConfig struct {
 }
 
 type Join struct {
-	inputQueue  middleware.Middleware
-	outputQueue middleware.Middleware
+	inputQueue  		middleware.Middleware
+	outputQueue 		middleware.Middleware
+	aggregationAmount   int
+	eofReceived   		map[uint64]int
+	clientFruitItemMap  map[uint64]map[string]fruititem.FruitItem
+	topSize             int
 }
 
 func NewJoin(config JoinConfig) (*Join, error) {
@@ -38,7 +44,14 @@ func NewJoin(config JoinConfig) (*Join, error) {
 		return nil, err
 	}
 
-	return &Join{inputQueue: inputQueue, outputQueue: outputQueue}, nil
+	return &Join{
+		inputQueue: inputQueue, 
+		outputQueue: outputQueue, 
+		aggregationAmount: config.AggregationAmount, 
+		eofReceived: make(map[uint64]int), 
+		clientFruitItemMap: make(map[uint64]map[string]fruititem.FruitItem),
+		topSize: config.TopSize, 
+	}, nil
 }
 
 func (join *Join) Run() {
@@ -50,19 +63,49 @@ func (join *Join) Run() {
 func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-
-	// bypassing error messages, not complete solution
-	_, _, isEof, err := inner.DeserializeMessage(&msg)
+	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
 		return
 	}
-
-	if isEof {
+	
+	if !isEof {
+		if _, ok := join.clientFruitItemMap[clientId]; !ok {
+			join.clientFruitItemMap[clientId] = map[string]fruititem.FruitItem{}
+		}
+		for _, fruitRecord := range fruitRecords {
+			join.clientFruitItemMap[clientId][fruitRecord.Fruit] = fruitRecord
+		}
 		return
-	}
+	} else {
+		join.eofReceived[clientId]++
+		if join.eofReceived[clientId] < join.aggregationAmount {
+			return
+		}
 
-	if err := join.outputQueue.Send(msg); err != nil {
-		slog.Error("While sending top", "err", err)
+		fruitTopRecords := join.buildFruitTop(clientId)
+		message, err := inner.SerializeMessage(clientId, fruitTopRecords)
+		if err != nil {
+			slog.Error("While serializing top message", "err", err)
+		}
+		if err := join.outputQueue.Send(*message); err != nil {
+			slog.Error("While sending top message", "err", err)
+		}
+
+		delete(join.eofReceived, clientId)
+		delete(join.clientFruitItemMap, clientId)
 	}
 }
+
+func (join *Join) buildFruitTop(clientId uint64) []fruititem.FruitItem {
+	fruitItems := make([]fruititem.FruitItem, 0, len(join.clientFruitItemMap[clientId]))
+	for _, item := range join.clientFruitItemMap[clientId] {
+		fruitItems = append(fruitItems, item)
+	}
+	sort.SliceStable(fruitItems, func(i, j int) bool {
+		return fruitItems[j].Less(fruitItems[i])
+	})
+	finalTopSize := min(join.topSize, len(fruitItems))
+	return fruitItems[:finalTopSize]
+}
+

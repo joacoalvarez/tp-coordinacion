@@ -2,6 +2,7 @@ package sum
 
 import (
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"sync"
 
@@ -28,6 +29,7 @@ type Sum struct {
 	controlConsumer 	 middleware.Middleware
 	clientFruitItemMap   map[uint64]map[string]fruititem.FruitItem
 	mutex                sync.Mutex
+	aggregationKeys      []string
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -80,6 +82,7 @@ func NewSum(config SumConfig) (*Sum, error) {
 		controlProducer: controlProducer,
 		controlConsumer: controlConsumer,
 		clientFruitItemMap:   map[uint64]map[string]fruititem.FruitItem{},
+		aggregationKeys:      outputExchangeRouteKeys,
 	}, nil
 }
 
@@ -158,12 +161,14 @@ func (sum *Sum) handleEndOfRecordMessage(clientId uint64) error {
 			slog.Debug("While serializing message", "err", err)
 			return err
 		}
-		if err := sum.outputExchange.Send(*message); err != nil {
+		// Cada fruta va a un único Aggregation, el mismo desde todos los Sum
+		if err := sum.outputExchange.SendTo(*message, sum.aggregationKeyFor(key)); err != nil {
 			slog.Debug("While sending message", "err", err)
 			return err
 		}
 	}
 
+	// El EOF va a todos los Aggregation
 	eofMessage := []fruititem.FruitItem{}
 	message, err := inner.SerializeMessage(clientId, eofMessage)
 	if err != nil {
@@ -177,6 +182,12 @@ func (sum *Sum) handleEndOfRecordMessage(clientId uint64) error {
 
 	delete(sum.clientFruitItemMap, clientId)
 	return nil
+}
+
+func (sum *Sum) aggregationKeyFor(fruit string) string {
+	hasher := fnv.New32a()
+	hasher.Write([]byte(fruit))
+	return sum.aggregationKeys[hasher.Sum32()%uint32(len(sum.aggregationKeys))]
 }
 
 func (sum *Sum) handleDataMessage(clientId uint64, fruitRecords []fruititem.FruitItem) error {
