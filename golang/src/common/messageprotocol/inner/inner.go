@@ -2,69 +2,40 @@ package inner
 
 import (
 	"encoding/json"
-	"errors"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
 )
 
-func serializeJson(message []interface{}) ([]byte, error) {
-	return json.Marshal(message)
+type message struct {
+	ClientId uint64
+	Data     []fruititem.FruitItem
 }
 
-func deserializeJson(message []byte) ([]interface{}, error) {
-	var data []interface{}
-	if err := json.Unmarshal(message, &data); err != nil {
-		return nil, err
-	}
-	return data, nil
+func serializeJson(msg message) ([]byte, error) {
+	return json.Marshal(msg)
 }
 
-func SerializeMessage(fruitRecords []fruititem.FruitItem) (*middleware.Message, error) {
-	data := []interface{}{}
-	for _, fruitRecord := range fruitRecords {
-		datum := []interface{}{
-			fruitRecord.Fruit,
-			fruitRecord.Amount,
-		}
-		data = append(data, datum)
+func deserializeJson(body []byte) (message, error) {
+	var msg message
+	if err := json.Unmarshal(body, &msg); err != nil {
+		return message{}, err
 	}
+	return msg, nil
+}
 
-	body, err := serializeJson(data)
+func SerializeMessage(id uint64, fruitRecords []fruititem.FruitItem) (*middleware.Message, error) {
+	body, err := serializeJson(message{ClientId: id, Data: fruitRecords})
 	if err != nil {
 		return nil, err
 	}
-	message := middleware.Message{Body: string(body)}
-
-	return &message, nil
+	return &middleware.Message{Body: string(body)}, nil
 }
 
-func DeserializeMessage(message *middleware.Message) ([]fruititem.FruitItem, bool, error) {
-	data, err := deserializeJson([]byte((*message).Body))
+func DeserializeMessage(msg *middleware.Message) (uint64, []fruititem.FruitItem, bool, error) {
+	decoded, err := deserializeJson([]byte(msg.Body))
 	if err != nil {
-		return nil, false, err
+		return 0, nil, false, err
 	}
-
-	fruitRecords := []fruititem.FruitItem{}
-	for _, datum := range data {
-		fruitPair, ok := datum.([]interface{})
-		if !ok {
-			return nil, false, errors.New("Datum is not an array")
-		}
-
-		fruit, ok := fruitPair[0].(string)
-		if !ok {
-			return nil, false, errors.New("Datum is not a (fruit, amount) pair")
-		}
-
-		fruitAmount, ok := fruitPair[1].(float64)
-		if !ok {
-			return nil, false, errors.New("Datum is not a (fruit, amount) pair")
-		}
-
-		fruitRecord := fruititem.FruitItem{Fruit: fruit, Amount: uint32(fruitAmount)}
-		fruitRecords = append(fruitRecords, fruitRecord)
-	}
-
-	return fruitRecords, len(fruitRecords) == 0, nil
+	return decoded.ClientId, decoded.Data, len(decoded.Data) == 0, nil
 }
