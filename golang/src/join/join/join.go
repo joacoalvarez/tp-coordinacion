@@ -87,9 +87,11 @@ func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func())
 		message, err := inner.SerializeMessage(clientId, fruitTopRecords)
 		if err != nil {
 			slog.Error("While serializing top message", "err", err)
+			return
 		}
 		if err := join.outputQueue.Send(*message); err != nil {
 			slog.Error("While sending top message", "err", err)
+			return
 		}
 
 		delete(join.eofReceived, clientId)

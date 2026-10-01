@@ -8,8 +8,9 @@ import (
 )
 
 type message struct {
-	ClientId uint64
-	Data     []fruititem.FruitItem
+	ClientId  uint64
+	Data      []fruititem.FruitItem
+	EofSeenBy []int
 }
 
 func serializeJson(msg message) ([]byte, error) {
@@ -38,4 +39,21 @@ func DeserializeMessage(msg *middleware.Message) (uint64, []fruititem.FruitItem,
 		return 0, nil, false, err
 	}
 	return decoded.ClientId, decoded.Data, len(decoded.Data) == 0, nil
+}
+
+// EOF used by sum to check if all have finished
+func SerializeEOFMessage(id uint64, eofSeenBy []int) (*middleware.Message, error) {
+	body, err := serializeJson(message{ClientId: id, Data: []fruititem.FruitItem{}, EofSeenBy: eofSeenBy})
+	if err != nil {
+		return nil, err
+	}
+	return &middleware.Message{Body: string(body)}, nil
+}
+
+func DeserializeEOFMessage(msg *middleware.Message) (uint64, []int, error) {
+	decoded, err := deserializeJson([]byte(msg.Body))
+	if err != nil {
+		return 0, nil, err
+	}
+	return decoded.ClientId, decoded.EofSeenBy, nil
 }
