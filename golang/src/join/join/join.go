@@ -1,6 +1,9 @@
 package join
 
 import (
+	"os"
+	"os/signal"
+	"syscall"
 	"log/slog"
 	"sort"
 
@@ -55,9 +58,25 @@ func NewJoin(config JoinConfig) (*Join, error) {
 }
 
 func (join *Join) Run() {
-	join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	go join.handleSignals()
+
+	err := join.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		join.handleMessage(msg, ack, nack)
 	})
+	if err != nil {
+		slog.Error("While consuming messages", "err", err)
+	}
+
+	join.inputQueue.Close()
+	join.outputQueue.Close()
+}
+
+func (join *Join) handleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
+	join.inputQueue.StopConsuming()
 }
 
 func (join *Join) handleMessage(msg middleware.Message, ack func(), nack func()) {

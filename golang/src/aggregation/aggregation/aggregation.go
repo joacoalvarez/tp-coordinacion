@@ -2,6 +2,9 @@ package aggregation
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"log/slog"
 	"sort"
 
@@ -57,9 +60,25 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 }
 
 func (aggregation *Aggregation) Run() {
-	aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	go aggregation.handleSignals()
+
+	err := aggregation.inputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		aggregation.handleMessage(msg, ack, nack)
 	})
+	if err != nil {
+		slog.Error("While consuming messages", "err", err)
+	}
+
+	aggregation.inputExchange.Close()
+	aggregation.outputQueue.Close()
+}
+
+func (aggregation *Aggregation) handleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
+	aggregation.inputExchange.StopConsuming()
 }
 
 func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func(), nack func()) {

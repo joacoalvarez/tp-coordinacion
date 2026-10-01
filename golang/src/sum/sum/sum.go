@@ -2,6 +2,9 @@ package sum
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 	"hash/fnv"
 	"log/slog"
 	"slices"
@@ -61,9 +64,25 @@ func NewSum(config SumConfig) (*Sum, error) {
 }
 
 func (sum *Sum) Run() {
-	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+	go sum.handleSignals()
+
+	err := sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleMessage(msg, ack, nack)
 	})
+	if err != nil {
+		slog.Error("While consuming messages", "err", err)
+	}
+
+	sum.inputQueue.Close()
+	sum.outputExchange.Close()
+}
+
+func (sum *Sum) handleSignals() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	slog.Info("SIGTERM signal received")
+	sum.inputQueue.StopConsuming()
 }
 
 func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
